@@ -35,7 +35,7 @@ from downloader import (
     source_ids,
 )
 from music import genius_search, recognize_file, shazam_available
-from storage import db
+from storage import StorageError, db
 
 log = logging.getLogger("bott")
 router = Router()
@@ -141,10 +141,9 @@ async def cmd_lyrics(message: Message, command: CommandObject):
         await status.edit_text("Ничего не нашёл 😕 Попробуйте другой фрагмент.")
         return
 
-    rows = []
-    for h in hits:
-        query = f"{h['artist']} - {h['title']}"
-        rows.append([(short(query, 60), f"a:{db.put('ytsearch1:' + query)}")])
+    queries = [f"{h['artist']} - {h['title']}" for h in hits]
+    keys = await db.put_many(["ytsearch1:" + q for q in queries])
+    rows = [[(short(q, 60), f"a:{k}")] for q, k in zip(queries, keys)]
     await status.edit_text("Возможно, это одна из этих песен 👇", reply_markup=kb(rows))
 
 
@@ -153,7 +152,7 @@ async def cmd_lyrics(message: Message, command: CommandObject):
 @router.message(F.text.regexp(URL_RE))
 async def on_link(message: Message):
     url = URL_RE.search(message.text).group(0)
-    key = db.put(url)
+    key = await db.put(url)
     await message.reply(
         "Что скачать?",
         reply_markup=kb([[("🎬 Видео", f"v:{key}"), ("🎵 Аудио MP3", f"a:{key}")]]),
@@ -177,12 +176,13 @@ async def do_search(message: Message, query: str):
         await status.edit_text("Ничего не найдено 😕")
         return
 
+    keys = await db.put_many([r["url"] for r in results])
     rows = []
-    for r in results:
+    for r, key in zip(results, keys):
         label = short(r["title"], 48)
         if d := fmt_duration(r["duration"]):
             label = f"{label} · {d}"
-        rows.append([(label, f"a:{db.put(r['url'])}")])
+        rows.append([(label, f"a:{key}")])
     await status.edit_text("Выберите трек 👇", reply_markup=kb(rows))
 
 
@@ -219,7 +219,7 @@ async def on_voice(message: Message, bot: Bot):
     query = f"{track['artist']} - {track['title']}".strip(" -")
     await status.edit_text(
         f"Похоже, это <b>{html.escape(query)}</b>",
-        reply_markup=kb([[("⬇️ Скачать MP3", f"a:{db.put('ytsearch1:' + query)}")]]),
+        reply_markup=kb([[("⬇️ Скачать MP3", f"a:{await db.put('ytsearch1:' + query)}")]]),
     )
 
 
@@ -290,7 +290,7 @@ async def show_progress(bot: Bot, status: Message, job: Job, action: ChatAction,
 
 async def send_cached(bot: Bot, chat_id: int, kind: str, sources: list[str]) -> bool:
     """Если этот файл уже отправлялся, пересылает его по file_id без скачивания."""
-    hit = db.get_file(sources, kind)
+    hit = await db.get_file(sources, kind)
     if not hit:
         return False
     file_id, title = hit
@@ -306,9 +306,9 @@ async def send_cached(bot: Bot, chat_id: int, kind: str, sources: list[str]) -> 
     except TelegramBadRequest as e:
         # например, бот пересоздан с другим токеном — file_id больше не действует
         log.warning("file_id из кэша не подошёл (%s), скачиваю заново", e)
-        db.forget_file(file_id)
+        await db.forget_file(file_id)
         return False
-    db.save_file(sources, kind, file_id, title)  # запоминаем и новые варианты ссылки
+    await db.save_file(sources, kind, file_id, title)  # запоминаем и новые варианты ссылки
     return True
 
 
@@ -346,7 +346,7 @@ async def fetch_and_send(bot: Bot, chat_id: int, job: Job, kind: str, target: st
             )
             sent = msg.audio or msg.document
         if sent:
-            db.save_file(sources, kind, sent.file_id, result.title)
+            await db.save_file(sources, kind, sent.file_id, result.title)
     finally:
         result.cleanup()
 
@@ -354,7 +354,7 @@ async def fetch_and_send(bot: Bot, chat_id: int, job: Job, kind: str, target: st
 @router.callback_query(F.data.regexp(r"^[va]:"))
 async def on_download(call: CallbackQuery, bot: Bot):
     kind, key = call.data.split(":", 1)
-    target = db.get(key)
+    target = await db.get(key)
     if not target:
         await call.answer("Кнопка устарела — отправьте ссылку или запрос заново.", show_alert=True)
         return
@@ -435,6 +435,15 @@ async def start_health_server():
     log.info("Health-check слушает порт %s", config.PORT)
 
 
+async def prune_daily():
+    while True:
+        await asyncio.sleep(24 * 3600)
+        try:
+            await db.prune()
+        except Exception:
+            log.exception("Не удалось почистить устаревшие записи в базе")
+
+
 def cleanup_tmp():
     for p in config.DOWNLOAD_DIR.iterdir():
         if p.is_dir():
@@ -450,6 +459,10 @@ async def main():
         raise SystemExit("Переменная окружения BOT_TOKEN не задана")
 
     cleanup_tmp()
+    try:
+        await db.init()
+    except StorageError as e:
+        raise SystemExit(f"Не удалось подключиться к базе ({db.backend_name}): {e}")
 
     session_kwargs = {"timeout": 900}
     if config.BOT_API_URL:
@@ -465,9 +478,14 @@ async def main():
     await start_health_server()
     await bot.delete_webhook(drop_pending_updates=True)
     me = await bot.get_me()
-    log.info("Бот @%s запущен. Cookies: %s, прокси: %s", me.username,
+    log.info("Бот @%s запущен. База: %s, cookies: %s, прокси: %s", me.username, db.backend_name,
              "да" if config.COOKIES_FILE else "нет", "да" if config.PROXY else "нет")
-    await dp.start_polling(bot)
+    pruner = asyncio.create_task(prune_daily())
+    try:
+        await dp.start_polling(bot)
+    finally:
+        pruner.cancel()
+        await db.close()
 
 
 if __name__ == "__main__":

@@ -48,6 +48,12 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # Чтобы кэш переживал передеплой, эта папка должна лежать на постоянном диске.
 DB_PATH = Path(os.getenv("DB_PATH", "data/bott.db"))
 
+# Cloudflare D1 вместо локального файла: база в облаке, ничего не теряется при передеплое.
+# Если заданы все три — DB_PATH не используется.
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "").strip()
+CF_D1_DATABASE_ID = os.getenv("CF_D1_DATABASE_ID", "").strip()
+CF_API_TOKEN = os.getenv("CF_API_TOKEN", "").strip()
+
 
 def _prepare_cookies() -> str | None:
     """Cookies нужны YouTube/Instagram, если они блокируют IP сервера.
