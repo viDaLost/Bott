@@ -44,6 +44,10 @@ PROXY = os.getenv("PROXY", "").strip() or None
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "/tmp/bott"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# База SQLite: кнопки и file_id отправленных файлов (повторная отправка без скачивания).
+# Чтобы кэш переживал передеплой, эта папка должна лежать на постоянном диске.
+DB_PATH = Path(os.getenv("DB_PATH", "data/bott.db"))
+
 
 def _prepare_cookies() -> str | None:
     """Cookies нужны YouTube/Instagram, если они блокируют IP сервера.

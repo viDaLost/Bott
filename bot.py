@@ -4,15 +4,14 @@ import html
 import logging
 import re
 import shutil
-import time
 import uuid
-from collections import OrderedDict
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ChatAction, ParseMode
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -26,47 +25,23 @@ from aiohttp import web
 import config
 from downloader import (
     URL_RE,
+    Cancelled,
     DownloadError,
+    Job,
     download_audio,
     download_video,
-    is_busy,
+    probe,
     search_youtube,
+    source_ids,
 )
 from music import genius_search, recognize_file, shazam_available
+from storage import db
 
 log = logging.getLogger("bott")
 router = Router()
 
 
 # ------------------------------------------------------------------ утилиты
-
-class TTLCache:
-    """callback_data в Telegram ограничена 64 байтами, поэтому ссылки храним тут."""
-
-    def __init__(self, maxsize: int = 5000, ttl: int = 6 * 3600):
-        self.maxsize, self.ttl = maxsize, ttl
-        self._data: OrderedDict[str, tuple[float, str]] = OrderedDict()
-
-    def put(self, value: str) -> str:
-        key = uuid.uuid4().hex[:12]
-        self._data[key] = (time.monotonic(), value)
-        while len(self._data) > self.maxsize:
-            self._data.popitem(last=False)
-        return key
-
-    def get(self, key: str) -> str | None:
-        item = self._data.get(key)
-        if not item:
-            return None
-        ts, value = item
-        if time.monotonic() - ts > self.ttl:
-            self._data.pop(key, None)
-            return None
-        return value
-
-
-cache = TTLCache()
-
 
 def fmt_duration(sec) -> str:
     if not sec:
@@ -169,7 +144,7 @@ async def cmd_lyrics(message: Message, command: CommandObject):
     rows = []
     for h in hits:
         query = f"{h['artist']} - {h['title']}"
-        rows.append([(short(query, 60), f"a:{cache.put('ytsearch1:' + query)}")])
+        rows.append([(short(query, 60), f"a:{db.put('ytsearch1:' + query)}")])
     await status.edit_text("Возможно, это одна из этих песен 👇", reply_markup=kb(rows))
 
 
@@ -178,7 +153,7 @@ async def cmd_lyrics(message: Message, command: CommandObject):
 @router.message(F.text.regexp(URL_RE))
 async def on_link(message: Message):
     url = URL_RE.search(message.text).group(0)
-    key = cache.put(url)
+    key = db.put(url)
     await message.reply(
         "Что скачать?",
         reply_markup=kb([[("🎬 Видео", f"v:{key}"), ("🎵 Аудио MP3", f"a:{key}")]]),
@@ -207,7 +182,7 @@ async def do_search(message: Message, query: str):
         label = short(r["title"], 48)
         if d := fmt_duration(r["duration"]):
             label = f"{label} · {d}"
-        rows.append([(label, f"a:{cache.put(r['url'])}")])
+        rows.append([(label, f"a:{db.put(r['url'])}")])
     await status.edit_text("Выберите трек 👇", reply_markup=kb(rows))
 
 
@@ -244,75 +219,204 @@ async def on_voice(message: Message, bot: Bot):
     query = f"{track['artist']} - {track['title']}".strip(" -")
     await status.edit_text(
         f"Похоже, это <b>{html.escape(query)}</b>",
-        reply_markup=kb([[("⬇️ Скачать MP3", f"a:{cache.put('ytsearch1:' + query)}")]]),
+        reply_markup=kb([[("⬇️ Скачать MP3", f"a:{db.put('ytsearch1:' + query)}")]]),
     )
 
 
 # ------------------------------------------------------------------ скачивание
 
-@router.callback_query(F.data.regexp(r"^[va]:"))
-async def on_download(call: CallbackQuery, bot: Bot):
-    kind, key = call.data.split(":", 1)
-    target = cache.get(key)
-    if not target:
-        await call.answer("Кнопка устарела — отправьте ссылку или запрос заново.", show_alert=True)
-        return
-    await call.answer()
+jobs: dict[str, Job] = {}
 
-    chat_id = call.message.chat.id
-    queued = is_busy()
-    status = await bot.send_message(chat_id, "⏳ В очереди…" if queued else "⏳ Скачиваю…")
+PHASE_TEXT = {
+    "probing": "🔎 Получаю информацию…",
+    "starting": "⬇️ Начинаю загрузку…",
+    "processing": "⚙️ Обрабатываю…",
+    "uploading": "📤 Отправляю…",
+}
 
-    action = ChatAction.UPLOAD_VIDEO if kind == "v" else ChatAction.UPLOAD_DOCUMENT
-    stop = asyncio.Event()
 
-    async def keep_action():
-        while not stop.is_set():
-            try:
-                await bot.send_chat_action(chat_id, action)
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(stop.wait(), 4.5)
-            except asyncio.TimeoutError:
-                pass
+def fmt_mb(size: float) -> str:
+    return f"{size / 2**20:.1f}"
 
-    action_task = asyncio.create_task(keep_action())
-    result = None
+
+def render_status(job: Job) -> str:
+    if job.cancelled:
+        return "⏳ Отменяю…"
+    if job.phase == "queued":
+        ahead = sum(1 for j in jobs.values() if j.phase == "queued" and j.created < job.created)
+        return f"⏳ В очереди, перед вами: {ahead}" if ahead else "⏳ В очереди…"
+    if job.phase != "downloading":
+        return PHASE_TEXT.get(job.phase, "⏳ Подождите…")
+
+    head = "⬇️ Скачиваю" + (f" (часть {job.part})" if job.part > 1 else "")
+    if job.total:
+        pct = min(job.downloaded / job.total, 1)
+        filled = round(pct * 10)
+        line = f"{'▓' * filled}{'░' * (10 - filled)} {pct:.0%}\n{fmt_mb(job.downloaded)} / {fmt_mb(job.total)} МБ"
+    else:
+        line = f"{fmt_mb(job.downloaded)} МБ"
+    if job.speed:
+        line += f" · {fmt_mb(job.speed)} МБ/с"
+    return f"{head}\n{line}"
+
+
+def cancel_kb(job: Job) -> InlineKeyboardMarkup | None:
+    if job.phase == "uploading" or job.cancelled:
+        return None
+    return kb([[("✖️ Отмена", f"c:{job.id}")]])
+
+
+async def show_progress(bot: Bot, status: Message, job: Job, action: ChatAction, stop: asyncio.Event):
+    """Раз в 3 секунды обновляет сообщение со статусом и показывает «отправляет файл…»."""
+    last = render_status(job)  # с этим текстом сообщение уже отправлено
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), 3)
+            return
+        except asyncio.TimeoutError:
+            pass
+        text = render_status(job)
+        try:
+            if job.phase not in ("queued", "probing"):
+                await bot.send_chat_action(status.chat.id, action)
+            if text != last:
+                await status.edit_text(text, reply_markup=cancel_kb(job))
+                last = text
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+        except Exception:
+            pass
+
+
+async def send_cached(bot: Bot, chat_id: int, kind: str, sources: list[str]) -> bool:
+    """Если этот файл уже отправлялся, пересылает его по file_id без скачивания."""
+    hit = db.get_file(sources, kind)
+    if not hit:
+        return False
+    file_id, title = hit
     try:
         if kind == "v":
-            result = await download_video(target)
-            await status.edit_text("📤 Отправляю…")
             await bot.send_video(
+                chat_id, file_id,
+                caption=html.escape(short(title, 900)) if title else None,
+                supports_streaming=True,
+            )
+        else:
+            await bot.send_audio(chat_id, file_id)
+    except TelegramBadRequest as e:
+        # например, бот пересоздан с другим токеном — file_id больше не действует
+        log.warning("file_id из кэша не подошёл (%s), скачиваю заново", e)
+        db.forget_file(file_id)
+        return False
+    db.save_file(sources, kind, file_id, title)  # запоминаем и новые варианты ссылки
+    return True
+
+
+async def fetch_and_send(bot: Bot, chat_id: int, job: Job, kind: str, target: str) -> None:
+    meta = await probe(target, job)
+    sources = [target, *source_ids(meta)]
+    if await send_cached(bot, chat_id, kind, sources):
+        return
+
+    result = await (download_video(meta, job) if kind == "v" else download_audio(meta, job))
+    try:
+        job.check()
+        job.phase = "uploading"
+        thumb = FSInputFile(result.thumb) if result.thumb else None
+        if kind == "v":
+            msg = await bot.send_video(
                 chat_id,
                 FSInputFile(result.path, filename=safe_filename(result.title) + result.path.suffix),
                 caption=html.escape(short(result.title, 900)),
                 duration=result.duration,
                 width=result.width,
                 height=result.height,
+                thumbnail=thumb,
                 supports_streaming=True,
             )
+            sent = msg.video or msg.document
         else:
-            result = await download_audio(target)
-            await status.edit_text("📤 Отправляю…")
-            await bot.send_audio(
+            msg = await bot.send_audio(
                 chat_id,
                 FSInputFile(result.path, filename=safe_filename(result.title) + ".mp3"),
                 title=short(result.title, 64),
                 performer=short(result.performer, 64) or None,
                 duration=result.duration,
+                thumbnail=thumb,
             )
-        await status.delete()
+            sent = msg.audio or msg.document
+        if sent:
+            db.save_file(sources, kind, sent.file_id, result.title)
+    finally:
+        result.cleanup()
+
+
+@router.callback_query(F.data.regexp(r"^[va]:"))
+async def on_download(call: CallbackQuery, bot: Bot):
+    kind, key = call.data.split(":", 1)
+    target = db.get(key)
+    if not target:
+        await call.answer("Кнопка устарела — отправьте ссылку или запрос заново.", show_alert=True)
+        return
+    await call.answer()
+
+    chat_id = call.message.chat.id
+    if await send_cached(bot, chat_id, kind, [target]):
+        return
+
+    job = Job(call.from_user.id)
+    jobs[job.id] = job
+    status = await bot.send_message(chat_id, render_status(job), reply_markup=cancel_kb(job))
+    action = ChatAction.UPLOAD_VIDEO if kind == "v" else ChatAction.UPLOAD_DOCUMENT
+    stop = asyncio.Event()
+    progress = asyncio.create_task(show_progress(bot, status, job, action, stop))
+    job.task = asyncio.create_task(fetch_and_send(bot, chat_id, job, kind, target))
+
+    outcome = None
+    try:
+        await job.task
+    except Cancelled:
+        outcome = "🚫 Загрузка отменена."
+    except asyncio.CancelledError:
+        if not job.cancelled:
+            raise
+        outcome = "🚫 Загрузка отменена."
     except DownloadError as e:
-        await status.edit_text("❌ " + html.escape(str(e)))
+        outcome = "❌ " + html.escape(str(e))
     except Exception:
         log.exception("Download/send failed for %s", target)
-        await status.edit_text("❌ Что-то пошло не так. Попробуйте позже.")
+        outcome = "❌ Что-то пошло не так. Попробуйте позже."
     finally:
         stop.set()
-        await action_task
-        if result:
-            result.cleanup()
+        await progress
+        jobs.pop(job.id, None)
+
+    try:
+        if outcome:
+            await status.edit_text(outcome)
+        else:
+            await status.delete()
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith("c:"))
+async def on_cancel(call: CallbackQuery):
+    job = jobs.get(call.data[2:])
+    if not job:
+        await call.answer("Загрузка уже завершена.")
+        return
+    if call.from_user.id != job.user_id:
+        await call.answer("Отменить может только тот, кто запустил загрузку.", show_alert=True)
+        return
+    if job.phase == "uploading":
+        await call.answer("Файл уже отправляется — отменить нельзя.")
+        return
+    job.cancel()
+    # Пока ждём очереди, поток ещё не запущен — задачу можно просто прервать
+    if job.phase == "queued" and job.task:
+        job.task.cancel()
+    await call.answer("Отменяю…")
 
 
 # ------------------------------------------------------------------ запуск
