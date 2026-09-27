@@ -4,7 +4,9 @@ import html
 import logging
 import re
 import shutil
+import time
 import uuid
+from collections import OrderedDict
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -164,26 +166,109 @@ async def on_text(message: Message):
     await do_search(message, message.text.strip())
 
 
+PAGE_SIZE = 8  # треков на одной странице результатов
+MAX_RESULTS = 200  # дальше листать нет смысла — YouTube выдаёт уже нерелевантное
+SEARCH_CHUNK = 40  # результаты подгружаются пачками, а не на каждую страницу
+SEARCH_TTL = 30 * 60
+
+# query -> (время, результаты, сколько запрашивали). Если пришло меньше, чем запрашивали, — это всё.
+_search_cache: OrderedDict[str, tuple[float, list[dict], int]] = OrderedDict()
+
+
+async def search_results(query: str, need: int) -> tuple[list[dict], bool]:
+    """Возвращает не меньше need результатов (если они есть) и флаг «больше результатов нет»."""
+    need = min(need, MAX_RESULTS)
+    cached = _search_cache.get(query)
+    if cached and time.monotonic() - cached[0] < SEARCH_TTL:
+        _, results, asked = cached
+        exhausted = len(results) < asked or asked >= MAX_RESULTS
+        if len(results) >= need or exhausted:
+            return results, exhausted
+
+    asked = min(MAX_RESULTS, -(-need // SEARCH_CHUNK) * SEARCH_CHUNK)  # вверх до пачки
+    results = await search_youtube(query, asked)
+    _search_cache[query] = (time.monotonic(), results, asked)
+    _search_cache.move_to_end(query)
+    while len(_search_cache) > 200:
+        _search_cache.popitem(last=False)
+    return results, len(results) < asked or asked >= MAX_RESULTS
+
+
+async def render_page(query: str, qkey: str, page: int) -> tuple[str, InlineKeyboardMarkup] | None:
+    start = page * PAGE_SIZE
+    results, exhausted = await search_results(query, start + PAGE_SIZE + 1)
+    chunk = results[start:start + PAGE_SIZE]
+    if not chunk:
+        return None
+
+    keys = await db.put_many([r["url"] for r in chunk])
+    rows = []
+    for n, (r, key) in enumerate(zip(chunk, keys), start + 1):
+        label = f"{n}. {short(r['title'], 44)}"
+        if d := fmt_duration(r["duration"]):
+            label = f"{label} · {d}"
+        rows.append([(label, f"a:{key}")])
+
+    has_next = len(results) > start + PAGE_SIZE or not exhausted
+    nav = []
+    if page > 0:
+        nav.append(("◀ Назад", f"p:{qkey}:{page - 1}"))
+    if page > 0 or has_next:
+        nav.append((f"стр. {page + 1}", "noop"))
+    if has_next:
+        nav.append(("Ещё ▶", f"p:{qkey}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    text = f"🎵 <b>{html.escape(short(query, 80))}</b>\nВыберите трек 👇"
+    return text, kb(rows)
+
+
 async def do_search(message: Message, query: str):
     status = await message.answer(f"🔎 Ищу: <i>{html.escape(short(query, 100))}</i>")
     try:
-        results = await search_youtube(query, 6)
+        qkey = await db.put(query)
+        page = await render_page(query, qkey, 0)
     except Exception:
         log.exception("Search failed")
         await status.edit_text("Не удалось выполнить поиск, попробуйте позже.")
         return
-    if not results:
+    if not page:
         await status.edit_text("Ничего не найдено 😕")
         return
+    text, markup = page
+    await status.edit_text(text, reply_markup=markup)
 
-    keys = await db.put_many([r["url"] for r in results])
-    rows = []
-    for r, key in zip(results, keys):
-        label = short(r["title"], 48)
-        if d := fmt_duration(r["duration"]):
-            label = f"{label} · {d}"
-        rows.append([(label, f"a:{key}")])
-    await status.edit_text("Выберите трек 👇", reply_markup=kb(rows))
+
+@router.callback_query(F.data.regexp(r"^p:[0-9a-f]+:\d+$"))
+async def on_page(call: CallbackQuery):
+    _, qkey, page_str = call.data.split(":")
+    page = int(page_str)
+    query = await db.get(qkey)
+    if not query:
+        await call.answer("Поиск устарел — отправьте запрос заново.", show_alert=True)
+        return
+    # Пока грузится следующая пачка, на кнопке крутится индикатор — отвечаем после загрузки
+    try:
+        result = await render_page(query, qkey, page)
+    except Exception:
+        log.exception("Search page failed")
+        await call.answer("Не удалось загрузить страницу, попробуйте позже.", show_alert=True)
+        return
+    if not result:
+        await call.answer("Больше ничего не нашлось.")
+        return
+    await call.answer()
+    text, markup = result
+    try:
+        await call.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest:
+        pass  # например, дважды нажали одну и ту же кнопку — текст не изменился
+
+
+@router.callback_query(F.data == "noop")
+async def on_noop(call: CallbackQuery):
+    await call.answer()
 
 
 # ------------------------------------------------------------------ распознавание
