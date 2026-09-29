@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -51,6 +52,7 @@ class Job:
         self.total: int | None = None
         self.speed: float | None = None
         self.part = 0  # номер скачиваемого файла: у YouTube видео и звук идут отдельно
+        self.unit = "bytes"  # "photos" — прогресс считается в штуках (фото из карусели)
         self.task: asyncio.Task | None = None
         self._last_file = None
         self._cancel = threading.Event()
@@ -171,6 +173,8 @@ def _humanize(err: Exception, url: str | None = None) -> str:
     text = str(err)
     low = text.lower()
     site = site_name(url)
+    if "ip address is blocked" in low:
+        return f"{site} блокирует IP-адрес сервера."
     if "not a bot" in low or "sign in to confirm" in low:
         return "YouTube заблокировал запрос с сервера. Нужны cookies или прокси (см. README)."
     if "403" in low:
@@ -483,13 +487,22 @@ async def probe(target: str, job: Job) -> dict:
     return await asyncio.to_thread(_probe_sync, target, job)
 
 
-async def _run_queued(job: Job, func, meta: dict) -> Result:
-    # Пока задача ждёт очереди (phase == "queued"), её можно отменить через task.cancel().
-    # Как только phase сменилась — работает поток, и отмена идёт только через job.cancel().
+@asynccontextmanager
+async def queue_slot(job: Job):
+    """Место в общей очереди загрузок (не больше MAX_PARALLEL одновременно).
+
+    Пока задача ждёт очереди (phase == "queued"), её можно отменить через task.cancel().
+    Как только phase сменилась — идёт загрузка, и отмена работает только через job.cancel().
+    """
     job.phase = "queued"
     async with _sem:
         job.check()
         job.phase = "starting"
+        yield
+
+
+async def _run_queued(job: Job, func, meta: dict) -> Result:
+    async with queue_slot(job):
         return await asyncio.to_thread(func, meta, job)
 
 

@@ -20,6 +20,7 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
 )
 from aiohttp import web
@@ -36,6 +37,7 @@ from downloader import (
     search_youtube,
     source_ids,
 )
+import tikwm
 from music import genius_search, recognize_file, shazam_available
 from storage import StorageError, db
 
@@ -332,6 +334,8 @@ def render_status(job: Job) -> str:
         return f"⏳ В очереди, перед вами: {ahead}" if ahead else "⏳ В очереди…"
     if job.phase != "downloading":
         return PHASE_TEXT.get(job.phase, "⏳ Подождите…")
+    if job.unit == "photos":
+        return f"📷 Скачиваю фото: {job.downloaded} из {job.total}"
 
     head = "⬇️ Скачиваю" + (f" (часть {job.part})" if job.part > 1 else "")
     if job.total:
@@ -398,12 +402,65 @@ async def send_cached(bot: Bot, chat_id: int, kind: str, sources: list[str]) -> 
 
 
 async def fetch_and_send(bot: Bot, chat_id: int, job: Job, kind: str, target: str) -> None:
+    try:
+        await fetch_ytdlp(bot, chat_id, job, kind, target)
+    except DownloadError as e:
+        if not tikwm.is_tiktok(target):
+            raise
+        # TikTok часто блокирует IP серверов — пробуем через TikWM
+        log.info("yt-dlp не справился с TikTok (%s), пробую TikWM", e)
+        await fetch_tiktok(bot, chat_id, job, kind, target, e)
+
+
+async def fetch_ytdlp(bot: Bot, chat_id: int, job: Job, kind: str, target: str) -> None:
     meta = await probe(target, job)
     sources = [target, *source_ids(meta)]
     if await send_cached(bot, chat_id, kind, sources):
         return
-
     result = await (download_video(meta, job) if kind == "v" else download_audio(meta, job))
+    await send_result(bot, chat_id, job, kind, result, sources)
+
+
+async def fetch_tiktok(bot: Bot, chat_id: int, job: Job, kind: str, target: str,
+                       first_error: DownloadError) -> None:
+    job.phase, job.part, job.downloaded, job.total, job.speed = "probing", 0, 0, None, None
+    try:
+        post = await tikwm.fetch_post(target)
+    except DownloadError as e:
+        raise DownloadError(f"{first_error} Запасной путь тоже не сработал: {e}") from e
+    job.check()
+
+    if post.images and kind == "v":
+        album = await tikwm.download_photos(post, job)
+        try:
+            job.check()
+            job.phase = "uploading"
+            await send_album(bot, chat_id, album)
+        finally:
+            album.cleanup()
+        return
+
+    sources = [target, post.source]
+    if await send_cached(bot, chat_id, kind, sources):
+        return
+    result = await (tikwm.download_video(post, job) if kind == "v" else tikwm.download_audio(post, job))
+    await send_result(bot, chat_id, job, kind, result, sources)
+
+
+async def send_album(bot: Bot, chat_id: int, album: tikwm.Album) -> None:
+    caption = html.escape(short(album.caption, 1000)) or None
+    if len(album.paths) == 1:
+        await bot.send_photo(chat_id, FSInputFile(album.paths[0]), caption=caption)
+        return
+    for start in range(0, len(album.paths), 10):  # в одном альбоме Telegram — до 10 фото
+        media = [
+            InputMediaPhoto(media=FSInputFile(p), caption=caption if start == 0 and i == 0 else None)
+            for i, p in enumerate(album.paths[start:start + 10])
+        ]
+        await bot.send_media_group(chat_id, media)
+
+
+async def send_result(bot: Bot, chat_id: int, job: Job, kind: str, result, sources: list[str]) -> None:
     try:
         job.check()
         job.phase = "uploading"
