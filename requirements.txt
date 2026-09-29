@@ -1,4 +1,4 @@
 aiogram>=3.13,<4
 aiohttp
 python-dotenv>=1.0
-yt-dlp[default]
+yt-dlp[default,curl-cffi]

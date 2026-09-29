@@ -26,4 +26,5 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8080
 
 # При каждом старте обновляем yt-dlp — сайты часто меняются
-CMD ["sh", "-c", "pip install -q -U --no-cache-dir 'yt-dlp[default]' || true; exec python bot.py"]
+# curl-cffi — имитация настоящего браузера: без неё TikTok и часть других сайтов отвечают 403
+CMD ["sh", "-c", "pip install -q -U --no-cache-dir 'yt-dlp[default,curl-cffi]' || true; exec python bot.py"]

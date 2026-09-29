@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yt_dlp
 
@@ -145,13 +146,37 @@ def _base_opts(workdir: Path | None, job: Job | None = None) -> dict:
     return opts
 
 
-def _humanize(err: Exception) -> str:
+_SITE_NAMES = {
+    "youtube.com": "YouTube", "youtu.be": "YouTube", "tiktok.com": "TikTok",
+    "instagram.com": "Instagram", "vk.com": "VK", "vkvideo.ru": "VK",
+    "twitter.com": "X (Twitter)", "x.com": "X (Twitter)", "facebook.com": "Facebook",
+    "soundcloud.com": "SoundCloud", "rutube.ru": "Rutube", "pinterest.com": "Pinterest",
+}
+
+
+def site_name(url: str | None) -> str:
+    """Человеческое название сайта по ссылке — для сообщений об ошибках."""
+    if not url:
+        return "Сайт"
+    if url.startswith("ytsearch"):
+        return "YouTube"
+    host = (urlparse(url).hostname or "").lower()
+    for domain, name in _SITE_NAMES.items():
+        if host == domain or host.endswith("." + domain):
+            return name
+    return host.removeprefix("www.") or "Сайт"
+
+
+def _humanize(err: Exception, url: str | None = None) -> str:
     text = str(err)
     low = text.lower()
-    if "not a bot" in low or "sign in to confirm" in low or "403" in low:
+    site = site_name(url)
+    if "not a bot" in low or "sign in to confirm" in low:
         return "YouTube заблокировал запрос с сервера. Нужны cookies или прокси (см. README)."
+    if "403" in low:
+        return f"{site} отклонил запрос с сервера (ошибка 403). Попробуйте позже; если повторяется — нужны cookies или прокси (см. README)."
     if "login" in low or "cookies" in low or "rate-limit" in low:
-        return "Сайт требует авторизацию. Добавьте cookies (см. README)."
+        return f"{site} требует авторизацию. Добавьте cookies (см. README)."
     if "unsupported url" in low:
         return "Эта ссылка не поддерживается."
     if "private" in low:
@@ -220,7 +245,7 @@ def _probe_sync(target: str, job: Job) -> dict:
         with yt_dlp.YoutubeDL(_base_opts(None) | {"skip_download": True}) as ydl:
             meta = _first_entry(ydl.extract_info(target, download=False))
     except yt_dlp.utils.DownloadError as e:
-        raise DownloadError(_humanize(e)) from e
+        raise DownloadError(_humanize(e, target)) from e
     job.check()
 
     duration = meta.get("duration")
@@ -352,7 +377,7 @@ def _download_video_sync(meta: dict, job: Job) -> Result:
             raise Cancelled from e
         except yt_dlp.utils.DownloadError as e:
             shutil.rmtree(workdir, ignore_errors=True)
-            raise DownloadError(_humanize(e)) from e
+            raise DownloadError(_humanize(e, _page_url(meta))) from e
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
             raise
@@ -406,7 +431,7 @@ def _download_audio_sync(meta: dict, job: Job) -> Result:
         raise Cancelled from e
     except yt_dlp.utils.DownloadError as e:
         shutil.rmtree(workdir, ignore_errors=True)
-        raise DownloadError(_humanize(e)) from e
+        raise DownloadError(_humanize(e, _page_url(meta))) from e
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
