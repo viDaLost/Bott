@@ -34,7 +34,17 @@ Telegram Serverless запускает JavaScript в изолятах V8. Там
 
 Ограничения платформы: файл до **49 МБ** (лимит Bot API, свой Local Bot API Server здесь не подключить). Обложки в MP3 больше не вшиваются, потому что без ffmpeg это невозможно. Название и исполнитель передаются в Telegram.
 
-## Установка
+## Установка с телефона (через GitHub Actions)
+
+Компьютер не нужен: деплой выполняет GitHub.
+
+1. **Включите Serverless у бота:** @BotFather → ваш бот → **Settings → Serverless**.
+2. **Скопируйте токен:** там же **CLI Access → Access token** (вид `app123456:секрет`).
+3. **Добавьте токен в GitHub.** Откройте github.com в браузере телефона: репозиторий → **Settings → Secrets and variables → Actions → New repository secret**. Имя `TGCLOUD_TOKEN`, значение — токен. В приложении GitHub этого раздела нет, нужен браузер; при необходимости включите «Версия для ПК».
+4. **Запустите деплой:** вкладка **Actions → Deploy → Run workflow**. Деплой также запускается сам при каждом пуше в ветку `claude/telegram-serverless`. Workflow прогоняет тесты, выкладывает код и создаёт таблицы в базе.
+5. Напишите боту `/id`, впишите полученный ID в `tgcloud/lib/config.js` → `OWNER_IDS` (можно прямо на github.com: карандаш «Edit» → Commit). После коммита бот задеплоится заново. Затем отправьте боту `/setup` и `/settings`.
+
+## Установка с компьютера
 
 Нужен Node.js 22.5 или новее.
 
@@ -113,6 +123,7 @@ tgcloud/
    ├─ links.js, targets.js, text.js, music.js
    └─ sources/            tikwm.js, cobalt.js, youtube.js
 test/                     тесты на заглушках платформы (npm test)
+.github/workflows/        деплой через GitHub Actions
 docs/tgcloud-sdk.md       справочник SDK платформы
 legacy/                   старая версия на Python (не деплоится)
 ```

@@ -1,0 +1,51 @@
+# Деплой бота в Telegram Serverless без компьютера.
+# Нужен секрет репозитория TGCLOUD_TOKEN (Settings → Secrets and variables → Actions):
+# @BotFather → бот → Serverless → CLI Access → Access token.
+# Запуск: при пуше в ветку или вручную — Actions → Deploy → Run workflow.
+name: Deploy
+
+on:
+  push:
+    branches: [claude/telegram-serverless]
+    paths: ['tgcloud/**', 'test/**', 'package.json', 'package-lock.json', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      TGCLOUD_TOKEN: ${{ secrets.TGCLOUD_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Тесты
+        run: npm test
+
+      - name: Проверка токена
+        if: env.TGCLOUD_TOKEN == ''
+        run: echo "::warning::Секрет TGCLOUD_TOKEN не задан — тесты прошли, деплой пропущен."
+
+      - name: Деплой кода
+        if: env.TGCLOUD_TOKEN != ''
+        run: |
+          npx tgcloud init --no-git
+          npx tgcloud push --force
+
+      - name: Миграция базы
+        if: env.TGCLOUD_TOKEN != ''
+        run: npx tgcloud migrate --yes
+
+      - name: Webhook
+        if: env.TGCLOUD_TOKEN != ''
+        run: npx tgcloud webhook
