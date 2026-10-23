@@ -146,3 +146,15 @@ test('X: разбор ответа FxTwitter', () => {
   assert.equal(post.title, 't');
   assert.equal(parseTweet({ code: 404 }), null);
 });
+
+import { parseInstafix } from '../tgcloud/lib/sources/instagram.js';
+
+test('Instagram: разбор зеркала InstaFix', () => {
+  const html = '<meta property="og:video" content="/videos/Cxyz/1"/><meta property="og:description" content="Текст"/>';
+  assert.deepEqual(parseInstafix(html, 'kkinstagram.com'), {
+    title: 'Текст', author: null, items: [{ type: 'video', url: 'https://kkinstagram.com/videos/Cxyz/1' }],
+  });
+  const img = parseInstafix('<meta content="https://cdn/p.jpg?a=1&amp;b=2" property="og:image">', 'h');
+  assert.equal(img.items[0].url, 'https://cdn/p.jpg?a=1&b=2');
+  assert.equal(parseInstafix('<html></html>', 'h'), null);
+});

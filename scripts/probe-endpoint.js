@@ -11,7 +11,7 @@ const DEFAULTS = {
   youtube: 'jNQXAC9IVRw',
   tiktok: 'https://www.tiktok.com/@scout2015/video/6718335390845095173',
   instagram: 'https://www.instagram.com/p/aye83DjauH/',
-  x: 'https://x.com/SpaceX/status/1866581238581956955',
+  x: 'https://x.com/jack/status/20', // первый твит: без медиа, но проверяет доступность
 };
 
 // Пробует скачать первые 64 КБ — так видно, отдаёт ли сервер сам файл.
@@ -61,8 +61,13 @@ export default async function (input) {
       return { items: post.items.map((i) => i.type), file: await head(post.items[0].url) };
     }),
     await check('x', async () => {
-      const post = await fetchTweet(t.x);
-      return { items: post.items.map((i) => i.type), file: await head(post.items[0].url) };
+      try {
+        const post = await fetchTweet(t.x);
+        return { items: post.items.map((i) => i.type), file: await head(post.items[0].url) };
+      } catch (e) {
+        if (/нет видео/.test(e?.message)) return { reachable: true, note: 'пост без медиа' };
+        throw e;
+      }
     }),
   ];
 }

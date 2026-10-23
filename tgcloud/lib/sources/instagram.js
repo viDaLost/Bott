@@ -1,6 +1,7 @@
 // Instagram без cobalt: публичный GraphQL-запрос сайта по коду поста
-// (тот же, что выполняет страница поста в браузере), запасной путь — страница
-// встраивания (/embed/). Работает для открытых постов; закрытые и «18+» — нет.
+// (тот же, что выполняет страница поста в браузере), затем страница
+// встраивания (/embed/), затем открытые зеркала InstaFix. Работает для
+// открытых постов; закрытые и «18+» — нет.
 import { fetch } from 'sdk';
 import { DownloadError } from '../job.js';
 import { instagramShortcode } from '../links.js';
@@ -76,6 +77,44 @@ async function viaEmbed(code) {
   return parseEmbed(await res.text());
 }
 
+// Открытые зеркала InstaFix (github.com/Wikidepia/InstaFix): отдают страницу с
+// og:video / og:image для превью в мессенджерах, а /videos/… ведёт прямо на файл.
+const INSTAFIX_HOSTS = ['kkinstagram.com', 'vxinstagram.com', 'uuinstagram.com', 'ddinstagram.com', 'instagramez.com'];
+
+function metaContent(html, prop) {
+  const re = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]*content=["']([^"']+)["']`, 'i');
+  const alt = new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]*(?:property|name)=["']${prop}["']`, 'i');
+  const m = re.exec(html) || alt.exec(html);
+  return m ? m[1].replace(/&amp;/g, '&') : null;
+}
+
+export function parseInstafix(html, host) {
+  const abs = (u) => (u && u.startsWith('/') ? `https://${host}${u}` : u);
+  const video = abs(metaContent(html, 'og:video') || metaContent(html, 'og:video:secure_url') || metaContent(html, 'twitter:player:stream'));
+  const image = abs(metaContent(html, 'og:image'));
+  const title = metaContent(html, 'og:description') || null;
+  if (video) return { title, author: null, items: [{ type: 'video', url: video }] };
+  if (image) return { title, author: null, items: [{ type: 'photo', url: image }] };
+  return null;
+}
+
+async function viaInstafix(code) {
+  for (const host of INSTAFIX_HOSTS) {
+    try {
+      const res = await fetch(`https://${host}/p/${code}/`, {
+        // зеркала отдают метатеги только «ботам-превьюшникам»
+        headers: { 'User-Agent': 'TelegramBot (like TwitterBot)' },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const post = parseInstafix(await res.text(), host);
+      if (post) return post;
+    } catch (e) {
+      console.warn(`InstaFix ${host}:`, e?.message);
+    }
+  }
+  return null;
+}
+
 export async function fetchInstagram(url) {
   let code = instagramShortcode(url);
   if (!code) {
@@ -89,7 +128,7 @@ export async function fetchInstagram(url) {
   }
   if (!code) throw new DownloadError('Не понял ссылку на Instagram — пришлите ссылку на пост или Reels.');
 
-  for (const attempt of [viaGraphql, viaEmbed]) {
+  for (const attempt of [viaGraphql, viaEmbed, viaInstafix]) {
     try {
       const post = await attempt(code);
       if (post) return { ...post, source: `instagram:${code}` };

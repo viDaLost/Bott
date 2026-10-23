@@ -340,7 +340,7 @@ async function viaYoutube(job, kind, id, sources, meta) {
     const any = kind === 'a' ? info.audios.length : info.videos.length;
     throw any
       ? new DownloadError(`${kind === 'a' ? 'Аудио' : 'Видео'} больше лимита Telegram (${Math.round(FILE_LIMIT / 2 ** 20)} МБ).`)
-      : new DownloadError(kind === 'a' ? 'YouTube не отдал звук для этого видео.' : 'YouTube не отдал видео со звуком — попробуйте «Аудио MP3».');
+      : new DownloadError(kind === 'a' ? 'YouTube не отдал звук для этого видео.' : 'YouTube сейчас отдаёт серверам Telegram только звук — нажмите «🎵 Аудио».');
   }
 
   job.setPhase('starting');
