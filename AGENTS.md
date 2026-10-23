@@ -156,9 +156,12 @@ The platform manages the bot's webhook for you, derived from your deployed
 ## This project (Bott)
 
 - Bot logic lives in `tgcloud/lib/bot.js`; `handlers/*.js` only forward updates to it.
-- No yt-dlp/ffmpeg here: TikTok goes through TikWM (`lib/sources/tikwm.js`),
-  everything else through a cobalt server (`lib/sources/cobalt.js`), YouTube search
-  through `youtubei/v1/search` (`lib/sources/youtube.js`).
+- No yt-dlp/ffmpeg here, and no external servers: TikTok goes through TikWM,
+  YouTube through the innertube player/search API, Instagram through its GraphQL
+  endpoint, X through FxTwitter (`lib/sources/`). A cobalt server is optional
+  (`/set cobalt_url`); when set it is tried first.
+- `scripts/probe-endpoint.js` is copied into `tgcloud/endpoints/` only in CI and run
+  with `tgcloud run` to check the sources from Telegram's cloud; never deploy it.
 - Storage uses raw SQL with named params (`db.run/all/get(query, { ':x': … })`) in
   `lib/storage.js` only; keep `tgcloud/schema.js` in sync with it.
 - Secrets are not in code: the owner sets them in chat with `/set` (table `settings`).

@@ -7,7 +7,7 @@ name: Deploy
 on:
   push:
     branches: [claude/telegram-serverless]
-    paths: ['tgcloud/**', 'test/**', 'package.json', 'package-lock.json', '.github/workflows/deploy.yml']
+    paths: ['tgcloud/**', 'test/**', 'scripts/**', 'package.json', 'package-lock.json', '.github/workflows/deploy.yml']
   workflow_dispatch:
 
 concurrency:
@@ -49,3 +49,13 @@ jobs:
       - name: Webhook
         if: env.TGCLOUD_TOKEN != ''
         run: npx tgcloud webhook
+
+      # Проверяет YouTube, TikTok, Instagram и X из облака Telegram — с тех же адресов,
+      # что и бот. Модуль запускается без деплоя; падение здесь не ломает деплой.
+      - name: Проверка источников
+        if: env.TGCLOUD_TOKEN != ''
+        continue-on-error: true
+        run: |
+          mkdir -p tgcloud/endpoints
+          cp scripts/probe-endpoint.js tgcloud/endpoints/probe.js
+          npx tgcloud run endpoints/probe '{}'

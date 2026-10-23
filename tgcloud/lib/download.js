@@ -1,16 +1,22 @@
-// Скачивание и отправка: TikTok через TikWM, остальное (и запасной путь для
-// TikTok) — через cobalt. Готовый файл уходит в Telegram из памяти, а его
-// file_id запоминается, чтобы повторные запросы отправлялись мгновенно.
+// Скачивание и отправка. Всё работает внутри Serverless: TikTok — через TikWM,
+// YouTube — через API плеера, Instagram — через GraphQL сайта, X — через FxTwitter.
+// Если владелец подключил свой cobalt, он используется первым (выше качество).
+// Готовый файл уходит в Telegram из памяти, а его file_id запоминается,
+// чтобы повторные запросы отправлялись мгновенно.
 import { api, InputFile } from 'sdk';
 import { AUDIO_BITRATES, MAX_DURATION, VIDEO_QUALITIES } from './config.js';
 import { Cancelled, DownloadError, TooLarge } from './job.js';
-import { isTikTok, sourceIds, youtubeId } from './links.js';
+import {
+  instagramShortcode, isTikTok, siteName, sourceIds, tweetId, youtubeId,
+} from './links.js';
 import { forgetFile, getFile, saveFile } from './storage.js';
 import { escapeHtml, safeFilename, short } from './text.js';
-import { download, FILE_LIMIT, isJpegOrPng } from './transfer.js';
+import { download, downloadRanged, FILE_LIMIT, isJpegOrPng } from './transfer.js';
 import { cobaltConfigured, cobaltRequest, titleFromFilename } from './sources/cobalt.js';
 import { fetchPost, MAX_PHOTOS, postSource, videoCandidates } from './sources/tikwm.js';
-import { oembed } from './sources/youtube.js';
+import { fetchInstagram } from './sources/instagram.js';
+import { fetchTweet } from './sources/twitter.js';
+import { youtubePlayer, YoutubeBlocked } from './sources/youtube.js';
 
 const PHOTO_LIMIT = 10 * 1024 * 1024; // Bot API: фото до 10 МБ
 const DOC_PREFIX = 'doc:'; // file_id документа (а не видео/аудио) в кэше
@@ -286,6 +292,8 @@ async function viaCobalt(job, cfg, kind, target, sources, meta) {
     job.setPhase('starting');
     try {
       const file = await download(url, { job });
+      // имя файла есть и в ответе cobalt, и (не всегда) в заголовке скачивания
+      file.filename = file.filename || (res.type === 'file' ? res.filename : null);
       if (!meta.title) meta.title = titleFromFilename(file.filename);
       await sendFile(job, kind, file, meta, sources);
       return;
@@ -302,7 +310,89 @@ async function viaCobalt(job, cfg, kind, target, sources, meta) {
   );
 }
 
+// ------------------------------------------------------------------ YouTube, Instagram, X без cobalt
+
+function resetJob(job) {
+  job.part = 0;
+  job.unit = 'bytes';
+  job.note = '';
+}
+
+async function viaYoutube(job, kind, id, sources, meta) {
+  job.setPhase('probing');
+  await job.tick(true);
+  let info;
+  try {
+    info = await youtubePlayer(id);
+  } catch (e) {
+    throw new DownloadError(e instanceof YoutubeBlocked ? e.message : 'YouTube сейчас недоступен. Попробуйте позже.');
+  }
+  job.check();
+  if (info.live) throw new DownloadError('Трансляции скачать нельзя.');
+  if (MAX_DURATION && info.duration && info.duration > MAX_DURATION) throw new DownloadError('Запись слишком длинная.');
+  meta.title = meta.title || info.title;
+  meta.performer = meta.performer || cleanChannel(info.author);
+  meta.duration = meta.duration || info.duration;
+
+  const formats = (kind === 'a' ? info.audios : info.videos)
+    .filter((f) => !f.size || f.size <= FILE_LIMIT * (f.exact ? 1 : 1.05));
+  if (!formats.length) {
+    const any = kind === 'a' ? info.audios.length : info.videos.length;
+    throw any
+      ? new DownloadError(`${kind === 'a' ? 'Аудио' : 'Видео'} больше лимита Telegram (${Math.round(FILE_LIMIT / 2 ** 20)} МБ).`)
+      : new DownloadError(kind === 'a' ? 'YouTube не отдал звук для этого видео.' : 'YouTube не отдал видео со звуком — попробуйте «Аудио MP3».');
+  }
+
+  job.setPhase('starting');
+  for (const f of formats) {
+    let file;
+    try {
+      file = await downloadRanged(f.url, f.exact ? f.size : null, { job, headers: { 'User-Agent': info.userAgent } });
+    } catch (e) {
+      if (e instanceof TooLarge) continue;
+      throw e;
+    }
+    file.contentType = f.mime;
+    file.filename = kind === 'a' ? 'audio.m4a' : 'video.mp4';
+    await sendFile(job, kind, file, meta, sources);
+    return;
+  }
+  throw new DownloadError(`${kind === 'a' ? 'Аудио' : 'Видео'} больше лимита Telegram (${Math.round(FILE_LIMIT / 2 ** 20)} МБ).`);
+}
+
+// Пост с одним видео — отправляется как видео и кэшируется; несколько файлов — альбомом.
+async function viaPost(job, kind, fetchPostFn, url, sources) {
+  job.setPhase('probing');
+  await job.tick(true);
+  const post = await fetchPostFn(url);
+  job.check();
+  const all = [...sources, post.source];
+  const single = post.items.length === 1 ? post.items[0] : null;
+
+  if (kind === 'a') {
+    throw new DownloadError('Отсюда можно скачать только видео и фото: отдельно звук без ffmpeg не извлечь. '
+      + 'Чтобы найти песню, напишите её название.');
+  }
+  if (!single || single.type === 'photo') {
+    await sendGallery(job, post.items, post.title);
+    return;
+  }
+  if (await sendCached(job.chatId, 'v', all)) return;
+  job.setPhase('starting');
+  const file = await download(single.url, { job });
+  await sendFile(job, 'v', file, { title: post.title }, all);
+}
+
 // ------------------------------------------------------------------ точка входа
+
+// Сайты, которые бот умеет скачивать сам, без cobalt.
+export function builtinSite(url) {
+  if (isTikTok(url)) return 'tiktok';
+  if (youtubeId(url)) return 'youtube';
+  if (instagramShortcode(url) || /instagram\.com\/share\//i.test(url)) return 'instagram';
+  if (tweetId(url)) return 'x';
+  return null;
+}
 
 // target — { url, title, channel, duration } (поиск уже разрешён в ссылку).
 // Кэш по ссылке проверяет вызывающий код (до показа статуса), здесь — по id поста.
@@ -311,26 +401,36 @@ export async function fetchAndSend(job, cfg, kind, target) {
     throw new DownloadError('Запись слишком длинная.');
   }
   const sources = sourceIds(target.url);
+  const site = builtinSite(target.url);
+  const meta = { title: target.title, performer: cleanChannel(target.channel), duration: target.duration };
 
-  if (isTikTok(target.url)) {
+  if (site === 'tiktok') {
     try {
       await viaTikwm(job, kind, target, sources);
       return;
     } catch (e) {
       if (e instanceof Cancelled || e instanceof TooLarge || !cobaltConfigured(cfg)) throw e;
       console.warn('TikWM не справился, пробую cobalt', e?.message);
-      job.part = 0;
-      job.unit = 'bytes';
+      resetJob(job);
+      await viaCobalt(job, cfg, kind, target, sources, meta);
+      return;
     }
   }
 
-  const meta = { title: target.title, performer: cleanChannel(target.channel), duration: target.duration };
-  if (!meta.title && youtubeId(target.url)) {
-    const info = await oembed(target.url);
-    if (info) {
-      meta.title = info.title;
-      meta.performer = meta.performer || cleanChannel(info.author);
+  // Если владелец подключил свой cobalt — сначала он (качество выше), встроенное — запасной путь.
+  if (cobaltConfigured(cfg)) {
+    try {
+      await viaCobalt(job, cfg, kind, target, sources, { ...meta });
+      return;
+    } catch (e) {
+      if (e instanceof Cancelled || !site) throw e;
+      console.warn('cobalt не справился, пробую встроенный способ', e?.message);
+      resetJob(job);
     }
   }
-  await viaCobalt(job, cfg, kind, target, sources, meta);
+
+  if (site === 'youtube') return viaYoutube(job, kind, youtubeId(target.url), sources, meta);
+  if (site === 'instagram') return viaPost(job, kind, fetchInstagram, target.url, sources);
+  if (site === 'x') return viaPost(job, kind, fetchTweet, target.url, sources);
+  throw new DownloadError(`${escapeHtml(siteName(target.url))} пока не поддерживается. Бот умеет скачивать из TikTok, YouTube, Instagram и X.`);
 }

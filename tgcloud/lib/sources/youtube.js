@@ -120,14 +120,107 @@ export async function searchMore(cfg, query, continuation) {
   return innertube({ continuation });
 }
 
-// Название и автор ролика по ссылке — для подписи к файлу.
-export async function oembed(url) {
-  try {
-    const res = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return { title: data.title || null, author: data.author_name || null };
-  } catch {
-    return null;
+// ------------------------------------------------------------------ скачивание без cobalt
+// Плеер YouTube отдаёт прямые ссылки на файлы. Клиенты Android VR и iOS получают
+// ссылки без шифрования подписи — их можно скачать обычным fetch. Без ffmpeg
+// нельзя склеить отдельные дорожки, поэтому видео — только «готовые» форматы
+// со звуком (обычно 360p), а аудио — M4A (AAC), который Telegram играет как музыку.
+
+const PLAYER_URL = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
+const PLAYER_CLIENTS = [
+  {
+    id: '28',
+    client: {
+      clientName: 'ANDROID_VR', clientVersion: '1.65.10', deviceMake: 'Oculus', deviceModel: 'Quest 3',
+      androidSdkVersion: 32, osName: 'Android', osVersion: '12L', hl: 'ru', gl: 'US',
+    },
+    userAgent: 'com.google.android.apps.youtube.vr.oculus/1.65.10 '
+      + '(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
+  },
+  {
+    id: '5',
+    client: {
+      clientName: 'IOS', clientVersion: '20.10.4', deviceMake: 'Apple', deviceModel: 'iPhone16,2',
+      osName: 'iPhone', osVersion: '18.3.2.22D82', hl: 'ru', gl: 'US',
+    },
+    userAgent: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)',
+  },
+];
+
+export class YoutubeBlocked extends Error {}
+
+function playabilityError(status) {
+  const reason = [status?.reason, ...(status?.messages || [])].filter(Boolean).join(' ');
+  if (/sign in|bot|войдите/i.test(reason)) return 'YouTube просит подтвердить, что запрос не от бота.';
+  if (/private|частн/i.test(reason)) return 'Видео приватное.';
+  if (/age|возраст/i.test(reason)) return 'Видео с возрастным ограничением — скачать нельзя.';
+  if (/country|стран|region/i.test(reason)) return 'Видео недоступно в регионе сервера.';
+  if (/live/i.test(reason)) return 'Трансляции скачать нельзя.';
+  return reason ? `YouTube: ${reason}` : 'Видео недоступно.';
+}
+
+function formatSize(f, duration) {
+  const exact = Number(f.contentLength);
+  if (exact) return { size: exact, exact: true };
+  const rate = Number(f.bitrate || f.averageBitrate);
+  return rate && duration ? { size: Math.round(rate / 8 * duration), exact: false } : { size: null, exact: false };
+}
+
+// Разбирает ответ плеера: метаданные и подходящие форматы (от лучшего к худшему).
+export function parsePlayer(data) {
+  const status = data?.playabilityStatus;
+  if (status?.status !== 'OK') {
+    throw new YoutubeBlocked(playabilityError(status));
   }
+  const details = data.videoDetails || {};
+  const duration = Number(details.lengthSeconds) || null;
+  const sd = data.streamingData || {};
+  const withUrl = (list) => (list || []).filter((f) => f.url && f.mimeType);
+
+  const videos = withUrl(sd.formats)
+    .filter((f) => f.mimeType.startsWith('video/mp4'))
+    .map((f) => ({ url: f.url, height: f.height || 0, mime: 'video/mp4', ...formatSize(f, duration) }))
+    .sort((a, b) => b.height - a.height);
+
+  const audios = withUrl(sd.adaptiveFormats)
+    .filter((f) => f.mimeType.startsWith('audio/mp4'))
+    .map((f) => ({ url: f.url, bitrate: Number(f.bitrate) || 0, mime: 'audio/mp4', ...formatSize(f, duration) }))
+    .sort((a, b) => b.bitrate - a.bitrate);
+
+  return {
+    title: details.title || null,
+    author: details.author || null,
+    duration,
+    live: Boolean(details.isLiveContent && !duration),
+    videos,
+    audios,
+  };
+}
+
+export async function youtubePlayer(videoId) {
+  let lastError = null;
+  for (const c of PLAYER_CLIENTS) {
+    try {
+      const res = await fetch(PLAYER_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': c.userAgent,
+          'X-YouTube-Client-Name': c.id,
+          'X-YouTube-Client-Version': c.client.clientVersion,
+        },
+        body: JSON.stringify({
+          context: { client: c.client }, videoId, contentCheckOk: true, racyCheckOk: true,
+        }),
+      });
+      if (!res.ok) throw new YoutubeBlocked(`YouTube ответил HTTP ${res.status}.`);
+      const info = parsePlayer(await res.json());
+      if (info.videos.length || info.audios.length) return { ...info, userAgent: c.userAgent };
+      lastError = new YoutubeBlocked('YouTube не отдал ссылки на файлы.');
+    } catch (e) {
+      lastError = e;
+      console.warn(`YouTube player (${c.client.clientName}) не сработал:`, e?.message);
+    }
+  }
+  throw lastError || new YoutubeBlocked('YouTube недоступен.');
 }

@@ -70,9 +70,9 @@ async function helpText(userId) {
   const lines = [
     '👋 <b>Привет! Я умею:</b>',
     '',
-    '🎬 <b>Скачивать видео</b> — пришлите ссылку на TikTok'
-      + (cobaltConfigured(cfg) ? ', YouTube, Instagram, VK и многие другие сайты' : '')
-      + ', затем выберите «Видео» или «Аудио MP3».',
+    '🎬 <b>Скачивать видео</b> — пришлите ссылку на TikTok, YouTube, Instagram или X'
+      + (cobaltConfigured(cfg) ? ' (и многие другие сайты)' : '')
+      + ', затем выберите «Видео» или «Аудио».',
     '',
     '🎵 <b>Искать музыку по названию</b> — просто напишите название песни '
       + 'или используйте <code>/music название</code>.',
@@ -168,7 +168,7 @@ async function handleCommand(message, { name, args }) {
 async function onLink(message, url) {
   const key = await put(url);
   await reply(message, 'Что скачать?', {
-    reply_markup: kb([[['🎬 Видео', `v:${key}`], ['🎵 Аудио MP3', `a:${key}`]]]),
+    reply_markup: kb([[['🎬 Видео', `v:${key}`], ['🎵 Аудио', `a:${key}`]]]),
   });
 }
 
@@ -251,7 +251,7 @@ async function onVoice(message) {
   const query = `${track.artist} - ${track.title}`.replace(/^\s*-\s*|\s*-\s*$/g, '');
   const key = await put(encodeTarget({ query }));
   await edit(status, `Похоже, это <b>${escapeHtml(query)}</b>`, {
-    reply_markup: kb([[['⬇️ Скачать MP3', `a:${key}`]]]),
+    reply_markup: kb([[['⬇️ Скачать трек', `a:${key}`]]]),
   });
 }
 

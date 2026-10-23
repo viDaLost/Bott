@@ -94,3 +94,55 @@ test('TikWM: разбор поста и выбор качества', () => {
   assert.deepEqual(videoCandidates(post, 2000), ['https://www.tikwm.com/video/play.mp4']);
   assert.throws(() => videoCandidates(post, 500), TooLarge);
 });
+
+import { instagramShortcode, tweetId } from '../tgcloud/lib/links.js';
+import { parseEmbed, parseMedia } from '../tgcloud/lib/sources/instagram.js';
+import { parseTweet } from '../tgcloud/lib/sources/twitter.js';
+import { parsePlayer, YoutubeBlocked } from '../tgcloud/lib/sources/youtube.js';
+
+test('ссылки: Instagram и X', () => {
+  assert.equal(instagramShortcode('https://www.instagram.com/reel/C1a2B3c4D5e/?igsh=x'), 'C1a2B3c4D5e');
+  assert.equal(instagramShortcode('https://instagram.com/nasa/p/Cxyz12345/'), 'Cxyz12345');
+  assert.equal(instagramShortcode('https://evil.example/instagram.com/p/Cxyz12345/'), null);
+  assert.equal(tweetId('https://x.com/user/status/1234567890?s=20'), '1234567890');
+  assert.equal(tweetId('https://mobile.twitter.com/i/web/status/42424242'), '42424242');
+  assert.equal(tweetId('https://x.com/user'), null);
+  assert.ok(sourceIds('https://x.com/u/status/99').includes('x:99'));
+});
+
+test('YouTube: разбор ответа плеера', () => {
+  const info = parsePlayer({
+    playabilityStatus: { status: 'OK' },
+    videoDetails: { title: 'T', author: 'A', lengthSeconds: '100' },
+    streamingData: {
+      formats: [{ url: 'u18', mimeType: 'video/mp4', height: 360, contentLength: '10' }, { signatureCipher: 'x', mimeType: 'video/mp4' }],
+      adaptiveFormats: [
+        { url: 'a1', mimeType: 'audio/mp4', bitrate: 48000 },
+        { url: 'a2', mimeType: 'audio/mp4', bitrate: 130000, contentLength: '2000' },
+        { url: 'w', mimeType: 'audio/webm', bitrate: 160000 },
+      ],
+    },
+  });
+  assert.deepEqual(info.videos.map((v) => v.url), ['u18']);
+  assert.deepEqual(info.audios.map((a) => a.url), ['a2', 'a1']);
+  assert.deepEqual([info.audios[0].size, info.audios[0].exact], [2000, true]);
+  assert.deepEqual([info.audios[1].size, info.audios[1].exact], [600000, false]); // по битрейту
+  assert.throws(() => parsePlayer({ playabilityStatus: { status: 'ERROR', reason: 'Video unavailable' } }), YoutubeBlocked);
+});
+
+test('Instagram: разбор поста и страницы встраивания', () => {
+  assert.equal(parseMedia(null), null);
+  const single = parseMedia({ is_video: true, video_url: 'v', display_url: 'p' });
+  assert.deepEqual(single.items, [{ type: 'video', url: 'v' }]);
+  const embed = parseEmbed('<script>{\\"video_url\\":\\"https:\\\\/\\\\/cdn.ig\\\\/v.mp4?a=1\\\\u0026b=2\\"}</script>');
+  assert.equal(embed.items[0].url, 'https://cdn.ig/v.mp4?a=1&b=2');
+  const img = parseEmbed('<img class="EmbeddedMediaImage" alt="" src="https://cdn.ig/p.jpg?x=1&amp;y=2">');
+  assert.equal(img.items[0].url, 'https://cdn.ig/p.jpg?x=1&y=2');
+});
+
+test('X: разбор ответа FxTwitter', () => {
+  const post = parseTweet({ tweet: { text: ' t ', author: { screen_name: 's' }, media: { all: [{ type: 'photo', url: 'p' }, { type: 'gif', url: 'g' }] } } });
+  assert.deepEqual(post.items, [{ type: 'photo', url: 'p' }, { type: 'video', url: 'g' }]);
+  assert.equal(post.title, 't');
+  assert.equal(parseTweet({ code: 404 }), null);
+});

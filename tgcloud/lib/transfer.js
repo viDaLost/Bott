@@ -110,6 +110,58 @@ export async function download(url, { job = null, limit = FILE_LIMIT, headers = 
   };
 }
 
+// Скачивание кусками через Range — для серверов вроде googlevideo, которые
+// режут скорость у длинных запросов целиком. size — точный размер файла.
+export async function downloadRanged(url, size, { job = null, limit = FILE_LIMIT, headers = {}, chunk = 8 * 1024 * 1024 } = {}) {
+  if (!size) return download(url, { job, limit, headers });
+  if (size > limit) throw new TooLarge(`Файл больше ${Math.round(limit / 2 ** 20)} МБ.`);
+
+  if (job) {
+    job.phase = 'downloading';
+    job.part += 1;
+    job.downloaded = 0;
+    job.total = size;
+    job.speed = null;
+    await job.tick(true);
+  }
+  const bytes = new Uint8Array(size);
+  const started = Date.now();
+  let done = 0;
+  let contentType = null;
+
+  while (done < size) {
+    const before = done;
+    const end = Math.min(done + chunk, size) - 1;
+    let res;
+    try {
+      res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, ...headers, Range: `bytes=${done}-${end}` } });
+    } catch (e) {
+      throw new DownloadError('Не удалось подключиться к серверу с файлом. Попробуйте позже.');
+    }
+    if (res.status !== 206 && res.status !== 200) {
+      throw new DownloadError(`Сервер с файлом ответил ошибкой (HTTP ${res.status}).`);
+    }
+    contentType = contentType || (res.headers.get('content-type') || '').split(';')[0].trim() || null;
+    // 200 вместо 206 — сервер игнорирует Range и отдаёт файл целиком с начала
+    if (res.status === 200) done = 0;
+    for await (const raw of res.body) {
+      const piece = toBytes(raw);
+      if (done + piece.length > size) throw new DownloadError('Сервер прислал больше данных, чем обещал.');
+      bytes.set(piece, done);
+      done += piece.length;
+      if (job) {
+        job.downloaded = done;
+        job.speed = done / Math.max((Date.now() - started) / 1000, 0.001);
+        await job.tick();
+      }
+    }
+    if (res.status === 200) break;
+    if (done === before) throw new DownloadError('Сервер с файлом перестал отдавать данные.');
+  }
+  if (done < size) throw new DownloadError('Файл скачался не полностью. Попробуйте ещё раз.');
+  return { bytes, contentType, filename: null };
+}
+
 export function isJpegOrPng(bytes) {
   return (bytes[0] === 0xff && bytes[1] === 0xd8)
     || (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47);

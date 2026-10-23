@@ -52,6 +52,19 @@ export function tiktokId(url) {
   return m ? m[1] : null;
 }
 
+export function instagramShortcode(url) {
+  if (!onDomain(hostname(url), 'instagram.com')) return null;
+  const m = /instagram\.com\/(?:[\w.]+\/)?(?:p|reel|reels|tv)\/([\w-]{5,})/i.exec(url);
+  return m ? m[1] : null;
+}
+
+export function tweetId(url) {
+  const host = hostname(url);
+  if (!onDomain(host, 'x.com') && !onDomain(host, 'twitter.com')) return null;
+  const m = /\/(?:\w+|i\/web)\/status(?:es)?\/(\d+)/i.exec(url);
+  return m ? m[1] : null;
+}
+
 // Разные ссылки на одно видео дают один и тот же идентификатор — так кэш file_id
 // срабатывает и для youtu.be/…, и для youtube.com/watch?v=…, и для Shorts.
 export function sourceIds(url) {
@@ -60,6 +73,10 @@ export function sourceIds(url) {
   if (yt) ids.push(`youtube:${yt}`);
   const tt = tiktokId(url);
   if (tt) ids.push(`tiktok:${tt}`);
+  const ig = instagramShortcode(url);
+  if (ig) ids.push(`instagram:${ig}`);
+  const tw = tweetId(url);
+  if (tw) ids.push(`x:${tw}`);
   ids.push(url);
   return ids;
 }
