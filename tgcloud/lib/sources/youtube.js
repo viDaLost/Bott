@@ -121,13 +121,22 @@ export async function searchMore(cfg, query, continuation) {
 }
 
 // ------------------------------------------------------------------ скачивание без cobalt
-// Плеер YouTube отдаёт прямые ссылки на файлы. Клиенты Android VR и iOS получают
-// ссылки без шифрования подписи — их можно скачать обычным fetch. Без ffmpeg
+// Плеер YouTube отдаёт прямые ссылки на файлы. Мобильные клиенты (Android, iOS,
+// Android VR) получают ссылки без шифрования подписи — их можно скачать обычным
+// fetch. Проверено из облака Telegram: Android отдаёт и видео со звуком, и аудио. Без ffmpeg
 // нельзя склеить отдельные дорожки, поэтому видео — только «готовые» форматы
 // со звуком (обычно 360p), а аудио — M4A (AAC), который Telegram играет как музыку.
 
 const PLAYER_URL = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false';
 const PLAYER_CLIENTS = [
+  {
+    id: '3',
+    client: {
+      clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 30,
+      osName: 'Android', osVersion: '11', hl: 'ru', gl: 'US',
+    },
+    userAgent: 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip',
+  },
   {
     id: '28',
     client: {
@@ -136,14 +145,6 @@ const PLAYER_CLIENTS = [
     },
     userAgent: 'com.google.android.apps.youtube.vr.oculus/1.65.10 '
       + '(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
-  },
-  {
-    id: '3',
-    client: {
-      clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 30,
-      osName: 'Android', osVersion: '11', hl: 'ru', gl: 'US',
-    },
-    userAgent: 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip',
   },
   {
     id: '5',

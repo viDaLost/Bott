@@ -8,16 +8,16 @@ import { fetchInstagram } from '../lib/sources/instagram.js';
 import { fetchTweet } from '../lib/sources/twitter.js';
 
 const DEFAULTS = {
-  youtube: 'jNQXAC9IVRw',
+  youtube: 'kXYiU_JCYtU', // Linkin Park — Numb, ~3 минуты
   tiktok: 'https://www.tiktok.com/@scout2015/video/6718335390845095173',
   instagram: 'https://www.instagram.com/p/aye83DjauH/',
   x: 'https://x.com/jack/status/20', // первый твит: без медиа, но проверяет доступность
 };
 
-// Пробует скачать первые 64 КБ — так видно, отдаёт ли сервер сам файл.
-async function head(url, headers = {}) {
+// Пробует скачать 64 КБ (по умолчанию — из начала) — так видно, отдаёт ли сервер сам файл.
+async function head(url, headers = {}, from = 0) {
   try {
-    const res = await fetch(url, { headers: { ...headers, Range: 'bytes=0-65535' } });
+    const res = await fetch(url, { headers: { ...headers, Range: `bytes=${from}-${from + 65535}` } });
     let n = 0;
     for await (const chunk of res.body) n += chunk.length;
     return `HTTP ${res.status}, ${n} байт`;
@@ -48,6 +48,10 @@ export default async function (input) {
         client: info.client,
         videos: info.videos.map((v) => `${v.height}p ${v.size}`),
         videoFile: info.videos[0] ? await head(info.videos[0].url, { 'User-Agent': info.userAgent }) : null,
+        // середина файла: некоторые ссылки YouTube обрываются после первых мегабайт
+        videoMiddle: info.videos[0]?.size
+          ? await head(info.videos[0].url, { 'User-Agent': info.userAgent }, Math.floor(info.videos[0].size / 2))
+          : null,
       };
     }),
     await check('youtube-player', async () => {
