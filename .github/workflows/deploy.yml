@@ -40,7 +40,13 @@ jobs:
         if: env.TGCLOUD_TOKEN != ''
         run: |
           npx tgcloud init --no-git
-          npx tgcloud push --force
+          # CLI 0.2.0 может упасть уже после успешного деплоя (при записи локального
+          # снимка), поэтому результат проверяет следующий шаг, а не код возврата.
+          npx tgcloud push --force || echo "::warning::tgcloud push завершился с ошибкой — сверяю облако с репозиторием"
+
+      - name: Сверка облака с репозиторием
+        if: env.TGCLOUD_TOKEN != ''
+        run: node scripts/check-deploy.mjs
 
       - name: Миграция базы
         if: env.TGCLOUD_TOKEN != ''
