@@ -1,0 +1,19 @@
+{
+  "name": "bott",
+  "private": true,
+  "type": "module",
+  "description": "Telegram-бот для скачивания видео и музыки на Telegram Serverless",
+  "scripts": {
+    "deploy": "tgcloud push",
+    "migrate": "tgcloud migrate",
+    "status": "tgcloud status",
+    "run": "tgcloud run",
+    "test": "node --no-warnings --import ./test/register.mjs --test \"test/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "@tgcloud/cli": "^0.2.0"
+  }
+}
