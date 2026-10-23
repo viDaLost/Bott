@@ -323,7 +323,7 @@ async function viaYoutube(job, kind, id, sources, meta) {
   await job.tick(true);
   let info;
   try {
-    info = await youtubePlayer(id);
+    info = await youtubePlayer(id, kind);
   } catch (e) {
     throw new DownloadError(e instanceof YoutubeBlocked ? e.message : 'YouTube сейчас недоступен. Попробуйте позже.');
   }

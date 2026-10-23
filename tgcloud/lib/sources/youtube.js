@@ -138,6 +138,14 @@ const PLAYER_CLIENTS = [
       + '(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
   },
   {
+    id: '3',
+    client: {
+      clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 30,
+      osName: 'Android', osVersion: '11', hl: 'ru', gl: 'US',
+    },
+    userAgent: 'com.google.android.youtube/20.10.38 (Linux; U; Android 11) gzip',
+  },
+  {
     id: '5',
     client: {
       clientName: 'IOS', clientVersion: '20.10.4', deviceMake: 'Apple', deviceModel: 'iPhone16,2',
@@ -197,8 +205,11 @@ export function parsePlayer(data) {
   };
 }
 
-export async function youtubePlayer(videoId) {
+// kind: 'v' — нужен файл со звуком и видео, 'a' — звук; null — любой.
+// Клиенты перебираются, пока какой-нибудь не отдаст нужный формат.
+export async function youtubePlayer(videoId, kind = null) {
   let lastError = null;
+  let fallback = null;
   for (const c of PLAYER_CLIENTS) {
     try {
       const res = await fetch(PLAYER_URL, {
@@ -214,13 +225,17 @@ export async function youtubePlayer(videoId) {
         }),
       });
       if (!res.ok) throw new YoutubeBlocked(`YouTube ответил HTTP ${res.status}.`);
-      const info = parsePlayer(await res.json());
-      if (info.videos.length || info.audios.length) return { ...info, userAgent: c.userAgent };
+      const info = { ...parsePlayer(await res.json()), userAgent: c.userAgent, client: c.client.clientName };
+      const wanted = kind === 'v' ? info.videos : kind === 'a' ? info.audios : [...info.videos, ...info.audios];
+      if (wanted.length) return info;
+      fallback = fallback || info;
       lastError = new YoutubeBlocked('YouTube не отдал ссылки на файлы.');
     } catch (e) {
       lastError = e;
       console.warn(`YouTube player (${c.client.clientName}) не сработал:`, e?.message);
     }
   }
+  // метаданные пригодятся для понятной ошибки, даже если нужного формата нет
+  if (fallback) return fallback;
   throw lastError || new YoutubeBlocked('YouTube недоступен.');
 }

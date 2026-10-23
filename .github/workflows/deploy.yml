@@ -64,4 +64,6 @@ jobs:
         run: |
           mkdir -p tgcloud/endpoints
           cp scripts/probe-endpoint.js tgcloud/endpoints/probe.js
-          npx tgcloud run endpoints/probe '{}'
+          # свои ссылки для проверки можно положить в scripts/probe-input.json:
+          # { "instagram": "https://www.instagram.com/reel/…", "youtube": "<id видео>" }
+          npx tgcloud run endpoints/probe "$(cat scripts/probe-input.json)"

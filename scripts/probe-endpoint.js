@@ -42,9 +42,18 @@ export default async function (input) {
       const r = await searchYoutube({}, 'linkin park numb');
       return { results: r.results.length, continuation: Boolean(r.continuation), first: r.results[0]?.title };
     }),
-    await check('youtube-player', async () => {
-      const info = await youtubePlayer(t.youtube);
+    await check('youtube-video', async () => {
+      const info = await youtubePlayer(t.youtube, 'v');
       return {
+        client: info.client,
+        videos: info.videos.map((v) => `${v.height}p ${v.size}`),
+        videoFile: info.videos[0] ? await head(info.videos[0].url, { 'User-Agent': info.userAgent }) : null,
+      };
+    }),
+    await check('youtube-player', async () => {
+      const info = await youtubePlayer(t.youtube, 'a');
+      return {
+        client: info.client,
         title: info.title,
         videos: info.videos.map((v) => `${v.height}p ${v.size}`),
         audios: info.audios.map((a) => `${a.bitrate} ${a.size}`),
